@@ -120,4 +120,49 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
         """Get current proxy state: running, port, number of captured flows."""
         return state.status(store)
 
+    def _decode_body(body: bytes) -> str:
+        if not body:
+            return ""
+        try:
+            return body.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            return base64.b64encode(body).decode()
+
+    def _format_flow(record: dict) -> dict:
+        return {
+            **record,
+            "req_body": _decode_body(record.get("req_body") or b""),
+            "res_body": _decode_body(record.get("res_body") or b""),
+            "req_headers": json.loads(record.get("req_headers") or "{}"),
+            "res_headers": json.loads(record.get("res_headers") or "{}"),
+            "tags": json.loads(record.get("tags") or "[]"),
+        }
+
+    @mcp.tool()
+    def list_flows(
+        host: str = None,
+        path: str = None,
+        method: str = None,
+        status_code: int = None,
+        limit: int = 100,
+    ) -> list:
+        """List captured HTTP flows with optional filters."""
+        rows = store.list_flows(host=host, path=path, method=method,
+                                status_code=status_code, limit=limit)
+        return [_format_flow(r) for r in rows]
+
+    @mcp.tool()
+    def get_flow(flow_id: str) -> dict:
+        """Get full detail of a captured flow by ID."""
+        record = store.get(flow_id)
+        if record is None:
+            return {"error": f"Flow '{flow_id}' not found"}
+        return _format_flow(record)
+
+    @mcp.tool()
+    def search_flows(query: str) -> list:
+        """Search flows by free text across URL, headers, and body."""
+        rows = store.search(query)
+        return [_format_flow(r) for r in rows]
+
     return mcp
