@@ -59,7 +59,7 @@ class ProxyState:
                 master = dump.DumpMaster(opts, with_termlog=False, with_dumper=False)
                 master.addons.add(addon)
                 self._master = master
-                self._loop = asyncio.get_event_loop()
+                self._loop = asyncio.get_running_loop()
                 addon._loop = self._loop
                 self.running = True
                 self.port = port
@@ -77,6 +77,8 @@ class ProxyState:
         self._thread.start()
         ready_event.wait(timeout=5)
 
+        if not ready_event.is_set():
+            return {"error": "Proxy startup timed out after 5 seconds"}
         if error_holder:
             return {"error": error_holder[0]}
 
@@ -91,7 +93,11 @@ class ProxyState:
             return {"error": "Proxy is not running"}
         if self._master:
             self._master.shutdown()
+        if self._thread:
+            self._thread.join(timeout=3)
         self.running = False
+        self._master = None
+        self._thread = None
         return {"stopped": True}
 
 
