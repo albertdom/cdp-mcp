@@ -278,3 +278,80 @@ def test_drop_flow_kills(store, addon):
     mock_drop.assert_called_once()
     assert result["dropped"] is True
     assert "f1" not in addon.intercepted_flows
+
+
+# --- Security analysis ---
+
+def test_analyze_flow_detects_jwt(store, addon):
+    record = _flow_record(
+        res_body=b'{"token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.abc"}',
+        res_headers={"Content-Type": "application/json"},
+    )
+    store.get.return_value = record
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "analyze_flow")("f1")
+    assert any("jwt" in f["type"].lower() for f in result["findings"])
+
+
+def test_analyze_flow_detects_missing_security_headers(store, addon):
+    record = _flow_record(res_headers={})
+    store.get.return_value = record
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "analyze_flow")("f1")
+    missing = [f for f in result["findings"] if f["type"] == "missing_security_header"]
+    assert len(missing) > 0
+
+
+def test_analyze_flow_not_found(store, addon):
+    store.get.return_value = None
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "analyze_flow")("missing")
+    assert "error" in result
+
+
+# --- Export ---
+
+def test_export_flow_curl(store, addon):
+    record = _flow_record(
+        method="POST", path="/api/login",
+        req_headers={"Content-Type": "application/json", "Authorization": "Bearer tok"},
+        req_body=b'{"user":"admin"}',
+    )
+    store.get.return_value = record
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "export_flow")("f1", format="curl")
+    assert result["format"] == "curl"
+    assert "curl" in result["output"]
+    assert "-X POST" in result["output"]
+
+
+def test_export_flow_python(store, addon):
+    record = _flow_record(method="GET", path="/api/data")
+    store.get.return_value = record
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "export_flow")("f1", format="python")
+    assert result["format"] == "python"
+    assert "requests" in result["output"]
+
+
+def test_export_flow_burp(store, addon):
+    record = _flow_record(method="GET", path="/api/data")
+    store.get.return_value = record
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "export_flow")("f1", format="burp")
+    assert result["format"] == "burp"
+    assert "<items" in result["output"]
+
+
+def test_export_flow_not_found(store, addon):
+    store.get.return_value = None
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "export_flow")("missing", format="curl")
+    assert "error" in result
+
+
+def test_export_flow_invalid_format(store, addon):
+    store.get.return_value = _flow_record()
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "export_flow")("f1", format="yaml")
+    assert "error" in result

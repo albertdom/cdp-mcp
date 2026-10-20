@@ -118,6 +118,104 @@ def _schedule_drop(flow, _loop=None):
     flow.kill()
 
 
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_SENSITIVE_RE = re.compile(
+    r"(password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\s*[=:\"]+\s*\S+",
+    re.IGNORECASE,
+)
+_SQLI_RE = re.compile(r"(\bOR\b\s+\d+=\d+|--|;DROP|UNION\s+SELECT)", re.IGNORECASE)
+_SECURITY_HEADERS = [
+    "x-frame-options", "x-content-type-options", "content-security-policy",
+    "strict-transport-security", "x-xss-protection", "referrer-policy",
+]
+
+
+def _analyze(record: dict) -> list:
+    findings = []
+    all_text = " ".join([
+        record.get("path", ""),
+        record.get("query", ""),
+        (record.get("req_body") or b"").decode("utf-8", errors="ignore"),
+        (record.get("res_body") or b"").decode("utf-8", errors="ignore"),
+        record.get("req_headers", ""),
+        record.get("res_headers", ""),
+    ])
+    res_headers_lower = {k.lower(): v for k, v in json.loads(record.get("res_headers") or "{}").items()}
+
+    for match in _JWT_RE.finditer(all_text):
+        findings.append({"type": "exposed_jwt", "severity": "medium",
+                         "detail": f"JWT token found: {match.group()[:40]}..."})
+
+    for h in _SECURITY_HEADERS:
+        if h not in res_headers_lower:
+            findings.append({"type": "missing_security_header", "severity": "low",
+                             "detail": f"Missing response header: {h}"})
+
+    for match in _SENSITIVE_RE.finditer(all_text):
+        findings.append({"type": "sensitive_data", "severity": "high",
+                         "detail": f"Possible sensitive field: {match.group()[:60]}"})
+
+    for match in _SQLI_RE.finditer(record.get("query", "") + " " + (record.get("req_body") or b"").decode("utf-8", errors="ignore")):
+        findings.append({"type": "sqli_pattern", "severity": "high",
+                         "detail": f"Possible SQLi pattern: {match.group()}"})
+
+    return findings
+
+
+def _export_curl(record: dict) -> str:
+    headers = json.loads(record.get("req_headers") or "{}")
+    url = f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}"
+    if record.get("query"):
+        url += f"?{record['query']}"
+    parts = [f"curl -X {record['method']} '{url}'"]
+    for k, v in headers.items():
+        parts.append(f"  -H '{k}: {v}'")
+    body = record.get("req_body") or b""
+    if body:
+        body_str = body.decode("utf-8", errors="replace")
+        parts.append(f"  -d '{body_str}'")
+    parts.append("  --proxy 'http://127.0.0.1:8080' --insecure")
+    return " \\\n".join(parts)
+
+
+def _export_python(record: dict) -> str:
+    headers = json.loads(record.get("req_headers") or "{}")
+    url = f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}"
+    if record.get("query"):
+        url += f"?{record['query']}"
+    body = record.get("req_body") or b""
+    body_repr = repr(body.decode("utf-8", errors="replace")) if body else "None"
+    return f"""import requests
+
+response = requests.{record['method'].lower()}(
+    "{url}",
+    headers={json.dumps(headers, indent=4)},
+    data={body_repr},
+    verify=False,
+)
+print(response.status_code, response.text)
+"""
+
+
+def _export_burp_xml(record: dict) -> str:
+    import xml.etree.ElementTree as ET
+    root = ET.Element("items", burpVersion="2023.1")
+    item = ET.SubElement(root, "item")
+    ET.SubElement(item, "time").text = str(record["timestamp"])
+    ET.SubElement(item, "url").text = f"{record['scheme']}://{record['host']}{record['path']}"
+    ET.SubElement(item, "host", ip="").text = record["host"]
+    ET.SubElement(item, "port").text = str(record["port"])
+    ET.SubElement(item, "protocol").text = record["scheme"]
+    ET.SubElement(item, "method").text = record["method"]
+    ET.SubElement(item, "path").text = record["path"]
+    req_b64 = base64.b64encode(record.get("req_body") or b"").decode()
+    ET.SubElement(item, "request", base64="true").text = req_b64
+    res_b64 = base64.b64encode(record.get("res_body") or b"").decode()
+    ET.SubElement(item, "response", base64="true").text = res_b64
+    ET.SubElement(item, "status").text = str(record.get("res_status", ""))
+    return ET.tostring(root, encoding="unicode")
+
+
 def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
     mcp = FastMCP("cdp-mcp")
     state = ProxyState()
@@ -279,5 +377,35 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
         _schedule_drop(flow, getattr(addon, "_loop", None))
         del addon.intercepted_flows[flow_id]
         return {"dropped": True, "flow_id": flow_id}
+
+    @mcp.tool()
+    def analyze_flow(flow_id: str) -> dict:
+        """Analyze a flow for security issues: exposed JWTs, missing headers, sensitive data, SQLi patterns."""
+        record = store.get(flow_id)
+        if record is None:
+            return {"error": f"Flow '{flow_id}' not found"}
+        findings = _analyze(record)
+        return {
+            "flow_id": flow_id,
+            "url": f"{record['scheme']}://{record['host']}{record['path']}",
+            "findings": findings,
+            "finding_count": len(findings),
+        }
+
+    @mcp.tool()
+    def export_flow(flow_id: str, format: str = "curl") -> dict:
+        """Export a flow as curl command, Python requests script, or Burp XML.
+        format: 'curl' | 'python' | 'burp'"""
+        record = store.get(flow_id)
+        if record is None:
+            return {"error": f"Flow '{flow_id}' not found"}
+        if format == "curl":
+            return {"format": "curl", "output": _export_curl(record)}
+        elif format == "python":
+            return {"format": "python", "output": _export_python(record)}
+        elif format == "burp":
+            return {"format": "burp", "output": _export_burp_xml(record)}
+        else:
+            return {"error": f"Unknown format '{format}'. Use: curl, python, burp"}
 
     return mcp
