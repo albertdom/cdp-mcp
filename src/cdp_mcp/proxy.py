@@ -1,4 +1,5 @@
 import json
+import threading
 from typing import Optional
 from cdp_mcp.store import FlowStore
 
@@ -7,7 +8,8 @@ class FlowStoreAddon:
     def __init__(self, store: FlowStore, intercept_filter: Optional[str] = None):
         self.store = store
         self.intercept_filter = intercept_filter
-        self.intercepted_flows: dict = {}  # flow_id -> mitmproxy flow object
+        self.intercepted_flows: dict = {}
+        self._lock = threading.Lock()
 
     def set_intercept_filter(self, filter_str: Optional[str]) -> None:
         self.intercept_filter = filter_str
@@ -15,12 +17,17 @@ class FlowStoreAddon:
     def request(self, flow) -> None:
         if self.intercept_filter and self.intercept_filter in flow.request.host:
             flow.intercept()
-            self.intercepted_flows[flow.id] = flow
+            with self._lock:
+                self.intercepted_flows[flow.id] = flow
 
     def response(self, flow) -> None:
+        if flow.response is None:
+            return
         duration_ms = int(
             (flow.response.timestamp_end - flow.request.timestamp_start) * 1000
         )
+        with self._lock:
+            was_intercepted = flow.id in self.intercepted_flows
         record = {
             "id": flow.id,
             "timestamp": flow.request.timestamp_start,
@@ -36,20 +43,22 @@ class FlowStoreAddon:
             "res_headers": json.dumps(dict(flow.response.headers)),
             "res_body": flow.response.content,
             "duration_ms": duration_ms,
-            "intercepted": 0,
+            "intercepted": 1 if was_intercepted else 0,
             "replayed": 0,
             "tags": json.dumps([]),
         }
         self.store.insert(record)
 
     def get_intercepted_flows(self) -> list[dict]:
-        result = []
-        for flow_id, flow in self.intercepted_flows.items():
-            result.append({
+        with self._lock:
+            snapshot = list(self.intercepted_flows.items())
+        return [
+            {
                 "id": flow_id,
                 "host": flow.request.host,
                 "method": flow.request.method,
                 "path": flow.request.path,
                 "scheme": flow.request.scheme,
-            })
-        return result
+            }
+            for flow_id, flow in snapshot
+        ]

@@ -1,7 +1,6 @@
 import json
 import pytest
-import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from cdp_mcp.store import FlowStore
 from cdp_mcp.proxy import FlowStoreAddon
 
@@ -112,3 +111,21 @@ def test_get_intercepted_flows(store):
     intercepted = addon.get_intercepted_flows()
     assert len(intercepted) == 1
     assert intercepted[0]["id"] == "flow1"
+
+
+def test_response_skips_none_response(store):
+    addon = FlowStoreAddon(store)
+    flow = _make_mock_flow()
+    flow.response = None
+    addon.response(flow)  # should not raise
+    result = store.get("flow1")
+    assert result is None  # nothing saved
+
+
+def test_response_marks_intercepted_flag(store):
+    addon = FlowStoreAddon(store, intercept_filter="example.com")
+    flow = _make_mock_flow(host="example.com")
+    addon.request(flow)  # marks as intercepted
+    addon.response(flow)  # saves to DB
+    result = store.get("flow1")
+    assert result["intercepted"] == 1
