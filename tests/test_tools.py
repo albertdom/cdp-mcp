@@ -56,7 +56,7 @@ def test_stop_proxy_not_running(store, addon, proxy_state):
 
 def _flow_record(flow_id="f1", host="example.com", method="GET",
                  path="/api", res_status=200, req_body=b"", res_body=b"ok",
-                 req_headers=None, res_headers=None):
+                 req_headers=None, res_headers=None, query=""):
     return {
         "id": flow_id,
         "timestamp": 1716000000.0,
@@ -65,7 +65,7 @@ def _flow_record(flow_id="f1", host="example.com", method="GET",
         "scheme": "https",
         "method": method,
         "path": path,
-        "query": "",
+        "query": query,
         "req_headers": json.dumps(req_headers or {}),
         "req_body": req_body,
         "res_status": res_status,
@@ -135,3 +135,64 @@ def test_decode_body_returns_base64_for_binary(store, addon):
     # binary content should be base64-encoded string
     decoded = base64.b64decode(result["res_body"])
     assert decoded == binary
+
+
+# --- Replay and fuzzing ---
+
+def test_replay_flow_not_found(store, addon):
+    store.get.return_value = None
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "replay_flow")("missing")
+    assert "error" in result
+
+
+@patch("cdp_mcp.server.http_requests.request")
+def test_replay_flow_sends_request(mock_req, store, addon):
+    record = _flow_record(
+        method="POST", path="/api/login",
+        req_headers={"Content-Type": "application/json"},
+        req_body=b'{"user":"admin"}',
+    )
+    store.get.return_value = record
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.content = b'{"ok":true}'
+    mock_req.return_value = mock_resp
+
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "replay_flow")("f1")
+    mock_req.assert_called_once()
+    assert result["status_code"] == 200
+
+
+@patch("cdp_mcp.server.http_requests.request")
+def test_replay_flow_with_header_modification(mock_req, store, addon):
+    record = _flow_record(req_headers={"Authorization": "Bearer old"})
+    store.get.return_value = record
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.headers = {}
+    mock_resp.content = b"unauthorized"
+    mock_req.return_value = mock_resp
+
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "replay_flow")("f1", modifications={"headers": {"Authorization": "Bearer new"}})
+    call_kwargs = mock_req.call_args[1]
+    assert call_kwargs["headers"]["Authorization"] == "Bearer new"
+
+
+@patch("cdp_mcp.server.http_requests.request")
+def test_fuzz_flow_repeats_n_times(mock_req, store, addon):
+    record = _flow_record(path="/api/item", query="id=1")
+    store.get.return_value = record
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.content = b"ok"
+    mock_req.return_value = mock_resp
+
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "fuzz_flow")("f1", field="query.id", values=["1", "2", "3"])
+    assert len(result) == 3
+    assert mock_req.call_count == 3

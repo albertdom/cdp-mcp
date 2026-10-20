@@ -165,4 +165,72 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
         rows = store.search(query)
         return [_format_flow(r) for r in rows]
 
+    def _apply_modifications(url: str, headers: dict, body: bytes, modifications: dict) -> tuple:
+        if not modifications:
+            return url, headers, body
+        if "headers" in modifications:
+            headers = {**headers, **modifications["headers"]}
+        if "body" in modifications:
+            body = modifications["body"].encode() if isinstance(modifications["body"], str) else modifications["body"]
+        if "path" in modifications:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            url = urlunparse(parsed._replace(path=modifications["path"]))
+        if "query" in modifications:
+            from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+            parsed = urlparse(url)
+            existing = parse_qs(parsed.query, keep_blank_values=True)
+            existing.update({k: [v] for k, v in modifications["query"].items()})
+            url = urlunparse(parsed._replace(query=urlencode(existing, doseq=True)))
+        return url, headers, body
+
+    def _do_request(record: dict, modifications: dict = None) -> dict:
+        headers = json.loads(record.get("req_headers") or "{}")
+        body = record.get("req_body") or b""
+        url = f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}"
+        if record.get("query"):
+            url += f"?{record['query']}"
+        url, headers, body = _apply_modifications(url, headers, body, modifications or {})
+        resp = http_requests.request(
+            record["method"], url, headers=headers, data=body, verify=False, timeout=30
+        )
+        store.update(record["id"], replayed=1)
+        return {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": _decode_body(resp.content),
+            "url": url,
+        }
+
+    @mcp.tool()
+    def replay_flow(flow_id: str, modifications: dict = None) -> dict:
+        """Replay a captured request. Optional modifications dict: {headers, body, path, query}."""
+        record = store.get(flow_id)
+        if record is None:
+            return {"error": f"Flow '{flow_id}' not found"}
+        return _do_request(record, modifications)
+
+    @mcp.tool()
+    def fuzz_flow(flow_id: str, field: str, values: list) -> list:
+        """Replay a flow N times, varying one field each time.
+        field format: 'query.param', 'header.Name', or 'body'.
+        Returns list of responses."""
+        record = store.get(flow_id)
+        if record is None:
+            return [{"error": f"Flow '{flow_id}' not found"}]
+        results = []
+        for value in values:
+            if field.startswith("query."):
+                param = field[len("query."):]
+                mods = {"query": {param: value}}
+            elif field.startswith("header."):
+                header = field[len("header."):]
+                mods = {"headers": {header: value}}
+            else:
+                mods = {"body": value}
+            resp = _do_request(record, mods)
+            resp["fuzz_value"] = value
+            results.append(resp)
+        return results
+
     return mcp
