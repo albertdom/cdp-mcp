@@ -3,6 +3,8 @@ import base64
 import json
 import pathlib
 import re
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -14,6 +16,44 @@ import requests as http_requests
 from mcp.server.fastmcp import FastMCP
 from cdp_mcp.store import FlowStore
 from cdp_mcp.proxy import FlowStoreAddon
+
+_IGNORE_HOSTS = [
+    r".*\.anthropic\.com",
+    r".*\.claude\.ai",
+    r"api\.anthropic\.com",
+    r"statsig\.anthropic\.com",
+    r"sentry\.io",
+]
+
+
+def _set_system_proxy(port: Optional[int]) -> None:
+    """Enable or disable the Windows system proxy via registry."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0, winreg.KEY_SET_VALUE,
+        )
+        if port is not None:
+            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
+            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
+                              "*.anthropic.com;*.claude.ai;api.anthropic.com;"
+                              "statsig.anthropic.com;*.sentry.io;<local>")
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+        else:
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+        # Notify Windows that proxy settings changed
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "[System.Net.WebRequest]::DefaultWebProxy = [System.Net.WebProxy]::new()"],
+            capture_output=True, timeout=3,
+        )
+    except Exception:
+        pass
 
 
 CERT_INSTALL_INSTRUCTIONS = """
@@ -60,6 +100,7 @@ class ProxyState:
                 opts = options.Options(
                     listen_host="127.0.0.1",
                     listen_port=port,
+                    ignore_hosts=_IGNORE_HOSTS,
                 )
                 master = dump.DumpMaster(opts, with_termlog=False, with_dumper=False)
                 master.addons.add(addon)
@@ -87,6 +128,8 @@ class ProxyState:
         if error_holder:
             return {"error": error_holder[0]}
 
+        _set_system_proxy(port)
+
         return {
             "started": True,
             "port": port,
@@ -103,6 +146,7 @@ class ProxyState:
         self.running = False
         self._master = None
         self._thread = None
+        _set_system_proxy(None)
         return {"stopped": True}
 
 
