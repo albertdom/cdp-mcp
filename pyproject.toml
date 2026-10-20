@@ -20,3 +20,8 @@ cdp-mcp = "cdp_mcp:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cdp_mcp"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
