@@ -196,3 +196,11 @@ def test_fuzz_flow_repeats_n_times(mock_req, store, addon):
     result = _get_tool(mcp, "fuzz_flow")("f1", field="query.id", values=["1", "2", "3"])
     assert len(result) == 3
     assert mock_req.call_count == 3
+
+
+def test_fuzz_flow_not_found(store, addon):
+    store.get.return_value = None
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "fuzz_flow")("missing", field="query.id", values=["1", "2"])
+    assert len(result) == 1
+    assert "error" in result[0]

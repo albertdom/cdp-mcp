@@ -5,6 +5,7 @@ import pathlib
 import re
 import threading
 from typing import Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import requests as http_requests
 from mcp.server.fastmcp import FastMCP
 from cdp_mcp.store import FlowStore
@@ -173,11 +174,9 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
         if "body" in modifications:
             body = modifications["body"].encode() if isinstance(modifications["body"], str) else modifications["body"]
         if "path" in modifications:
-            from urllib.parse import urlparse, urlunparse
             parsed = urlparse(url)
             url = urlunparse(parsed._replace(path=modifications["path"]))
         if "query" in modifications:
-            from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
             parsed = urlparse(url)
             existing = parse_qs(parsed.query, keep_blank_values=True)
             existing.update({k: [v] for k, v in modifications["query"].items()})
