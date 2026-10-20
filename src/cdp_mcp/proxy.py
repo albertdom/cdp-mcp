@@ -1,1 +1,55 @@
-# mitmproxy addon
+import json
+from typing import Optional
+from cdp_mcp.store import FlowStore
+
+
+class FlowStoreAddon:
+    def __init__(self, store: FlowStore, intercept_filter: Optional[str] = None):
+        self.store = store
+        self.intercept_filter = intercept_filter
+        self.intercepted_flows: dict = {}  # flow_id -> mitmproxy flow object
+
+    def set_intercept_filter(self, filter_str: Optional[str]) -> None:
+        self.intercept_filter = filter_str
+
+    def request(self, flow) -> None:
+        if self.intercept_filter and self.intercept_filter in flow.request.host:
+            flow.intercept()
+            self.intercepted_flows[flow.id] = flow
+
+    def response(self, flow) -> None:
+        duration_ms = int(
+            (flow.response.timestamp_end - flow.request.timestamp_start) * 1000
+        )
+        record = {
+            "id": flow.id,
+            "timestamp": flow.request.timestamp_start,
+            "host": flow.request.host,
+            "port": flow.request.port,
+            "scheme": flow.request.scheme,
+            "method": flow.request.method,
+            "path": flow.request.path,
+            "query": flow.request.query_string,
+            "req_headers": json.dumps(dict(flow.request.headers)),
+            "req_body": flow.request.content,
+            "res_status": flow.response.status_code,
+            "res_headers": json.dumps(dict(flow.response.headers)),
+            "res_body": flow.response.content,
+            "duration_ms": duration_ms,
+            "intercepted": 0,
+            "replayed": 0,
+            "tags": json.dumps([]),
+        }
+        self.store.insert(record)
+
+    def get_intercepted_flows(self) -> list[dict]:
+        result = []
+        for flow_id, flow in self.intercepted_flows.items():
+            result.append({
+                "id": flow_id,
+                "host": flow.request.host,
+                "method": flow.request.method,
+                "path": flow.request.path,
+                "scheme": flow.request.scheme,
+            })
+        return result
