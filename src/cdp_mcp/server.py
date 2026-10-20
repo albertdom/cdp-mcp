@@ -162,18 +162,23 @@ def _analyze(record: dict) -> list:
     return findings
 
 
+def _sh_escape(s: str) -> str:
+    """Escape single quotes in a string for use in single-quoted shell strings."""
+    return s.replace("'", "'\"'\"'")
+
+
 def _export_curl(record: dict) -> str:
     headers = json.loads(record.get("req_headers") or "{}")
     url = f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}"
     if record.get("query"):
         url += f"?{record['query']}"
-    parts = [f"curl -X {record['method']} '{url}'"]
+    parts = [f"curl -X {record['method']} '{_sh_escape(url)}'"]
     for k, v in headers.items():
-        parts.append(f"  -H '{k}: {v}'")
+        parts.append(f"  -H '{_sh_escape(k)}: {_sh_escape(str(v))}'")
     body = record.get("req_body") or b""
     if body:
         body_str = body.decode("utf-8", errors="replace")
-        parts.append(f"  -d '{body_str}'")
+        parts.append(f"  -d '{_sh_escape(body_str)}'")
     parts.append("  --proxy 'http://127.0.0.1:8080' --insecure")
     return " \\\n".join(parts)
 
@@ -202,7 +207,7 @@ def _export_burp_xml(record: dict) -> str:
     root = ET.Element("items", burpVersion="2023.1")
     item = ET.SubElement(root, "item")
     ET.SubElement(item, "time").text = str(record["timestamp"])
-    ET.SubElement(item, "url").text = f"{record['scheme']}://{record['host']}{record['path']}"
+    ET.SubElement(item, "url").text = f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}"
     ET.SubElement(item, "host", ip="").text = record["host"]
     ET.SubElement(item, "port").text = str(record["port"])
     ET.SubElement(item, "protocol").text = record["scheme"]
