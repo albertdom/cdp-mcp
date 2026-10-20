@@ -114,7 +114,7 @@ def _schedule_resume(flow, loop, modifications: dict = None):
         flow.resume()
 
 
-def _schedule_drop(flow, loop):
+def _schedule_drop(flow, _loop=None):
     flow.kill()
 
 
