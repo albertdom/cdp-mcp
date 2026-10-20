@@ -1,4 +1,4 @@
-"""Smoke test: verify all 14 tools are registered."""
+"""Smoke test: verify all 17 tools are registered."""
 from unittest.mock import MagicMock
 from cdp_mcp.store import FlowStore
 from cdp_mcp.proxy import FlowStoreAddon
@@ -10,9 +10,10 @@ EXPECTED_TOOLS = {
     "replay_flow", "fuzz_flow",
     "enable_intercept", "get_intercepted", "release_flow", "drop_flow",
     "analyze_flow", "export_flow",
+    "send_request", "extract_links", "crawl",
 }
 
-def test_all_14_tools_registered(tmp_path):
+def test_all_17_tools_registered(tmp_path):
     store = FlowStore(str(tmp_path / "flows.db"))
     addon = FlowStoreAddon(store)
     mcp = create_server(store, addon)

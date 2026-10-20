@@ -363,3 +363,82 @@ def test_export_flow_invalid_format(store, addon):
     mcp = create_server(store, addon)
     result = _get_tool(mcp, "export_flow")("f1", format="yaml")
     assert "error" in result
+
+# --- Autonomous exploration ---
+
+@patch("cdp_mcp.server.http_requests.request")
+def test_send_request_saves_flow(mock_req, store, addon):
+    store.insert = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"Content-Type": "text/html"}
+    mock_resp.content = b"<h1>Hello</h1>"
+    mock_resp.url = "https://example.com/"
+    mock_req.return_value = mock_resp
+
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "send_request")("https://example.com/")
+    assert result["status_code"] == 200
+    assert "flow_id" in result
+    store.insert.assert_called_once()
+
+
+@patch("cdp_mcp.server.http_requests.request")
+def test_send_request_error(mock_req, store, addon):
+    mock_req.side_effect = Exception("Connection refused")
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "send_request")("https://badhost.invalid/")
+    assert "error" in result
+
+
+def test_extract_links_returns_absolute_urls(store, addon):
+    html = '<a href="/page1">one</a><a href="https://other.com/x">two</a>'
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "extract_links")(html, "https://example.com")
+    assert "https://example.com/page1" in result
+    assert "https://other.com/x" in result
+
+
+def test_extract_links_same_domain_only(store, addon):
+    html = '<a href="/page1">one</a><a href="https://other.com/x">two</a>'
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "extract_links")(html, "https://example.com", same_domain_only=True)
+    assert "https://example.com/page1" in result
+    assert "https://other.com/x" not in result
+
+
+@patch("cdp_mcp.server.http_requests.get")
+def test_crawl_visits_base_url(mock_get, store, addon):
+    store.insert = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"content-type": "text/html"}
+    mock_resp.content = b"<a href='/about'>about</a>"
+    mock_resp.url = "https://example.com/"
+    mock_get.return_value = mock_resp
+
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "crawl")("https://example.com/", max_pages=1)
+    assert result["pages_crawled"] == 1
+    assert result["results"][0]["status_code"] == 200
+
+
+@patch("cdp_mcp.server.http_requests.get")
+def test_crawl_follows_links(mock_get, store, addon):
+    store.insert = MagicMock()
+
+    def side_effect(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"content-type": "text/html"}
+        resp.url = url
+        if "about" in url:
+            resp.content = b"<a href='/'>home</a>"
+        else:
+            resp.content = b"<a href='/about'>about</a>"
+        return resp
+
+    mock_get.side_effect = side_effect
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "crawl")("https://example.com/", max_pages=5, max_depth=2)
+    assert result["pages_crawled"] >= 2

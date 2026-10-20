@@ -4,8 +4,12 @@ import json
 import pathlib
 import re
 import threading
+import time
+import uuid
+from collections import deque
+from html.parser import HTMLParser
 from typing import Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse, urljoin, urlunparse
 import requests as http_requests
 from mcp.server.fastmcp import FastMCP
 from cdp_mcp.store import FlowStore
@@ -222,6 +226,76 @@ def _export_burp_xml(record: dict) -> str:
     return ET.tostring(root, encoding="unicode")
 
 
+class _LinkExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attr_map = dict(attrs)
+        if tag == "a":
+            href = attr_map.get("href", "")
+            if href:
+                self.links.append(href)
+        elif tag == "form":
+            action = attr_map.get("action", "")
+            if action:
+                self.links.append(action)
+
+
+def _extract_links_from_html(html: str, base_url: str) -> list[str]:
+    parser = _LinkExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    seen, result = set(), []
+    for raw in parser.links:
+        try:
+            abs_url = urljoin(base_url, raw)
+            parsed = urlparse(abs_url)
+            if parsed.scheme not in ("http", "https"):
+                continue
+            clean = parsed._replace(fragment="").geturl()
+            if clean not in seen:
+                seen.add(clean)
+                result.append(clean)
+        except Exception:
+            pass
+    return result
+
+
+def _save_synthetic_flow(
+    store: FlowStore, url: str, method: str,
+    req_headers: dict, req_body, resp, duration_ms: int,
+    tags: list = None,
+) -> str:
+    parsed = urlparse(url)
+    flow_id = str(uuid.uuid4())
+    body_bytes = req_body.encode() if isinstance(req_body, str) else (req_body or b"")
+    record = {
+        "id": flow_id,
+        "timestamp": time.time(),
+        "host": parsed.hostname or "",
+        "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+        "scheme": parsed.scheme,
+        "method": method.upper(),
+        "path": parsed.path or "/",
+        "query": parsed.query,
+        "req_headers": json.dumps(req_headers or {}),
+        "req_body": body_bytes,
+        "res_status": resp.status_code,
+        "res_headers": json.dumps(dict(resp.headers)),
+        "res_body": resp.content,
+        "duration_ms": duration_ms,
+        "intercepted": 0,
+        "replayed": 0,
+        "tags": json.dumps(tags or []),
+    }
+    store.insert(record)
+    return flow_id
+
+
 def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
     mcp = FastMCP("cdp-mcp")
     state = ProxyState()
@@ -415,5 +489,116 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
             return {"format": "burp", "output": _export_burp_xml(record)}
         else:
             return {"error": f"Unknown format '{format}'. Use: curl, python, burp"}
+
+    @mcp.tool()
+    def send_request(
+        url: str,
+        method: str = "GET",
+        headers: dict = None,
+        body: str = None,
+        follow_redirects: bool = True,
+    ) -> dict:
+        """Send an HTTP request to any URL. Saves the flow to the database.
+        Use this to probe endpoints, submit forms, or test specific requests."""
+        t0 = time.time()
+        try:
+            resp = http_requests.request(
+                method.upper(),
+                url,
+                headers=headers or {},
+                data=body.encode() if isinstance(body, str) else body,
+                verify=False,
+                timeout=30,
+                allow_redirects=follow_redirects,
+            )
+            duration_ms = int((time.time() - t0) * 1000)
+            flow_id = _save_synthetic_flow(
+                store, url, method, headers or {}, body, resp, duration_ms, tags=["sent"]
+            )
+            return {
+                "flow_id": flow_id,
+                "status_code": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": _decode_body(resp.content),
+                "final_url": resp.url,
+                "duration_ms": duration_ms,
+            }
+        except Exception as e:
+            return {"error": str(e), "url": url}
+
+    @mcp.tool()
+    def extract_links(html: str, base_url: str, same_domain_only: bool = False) -> list:
+        """Extract all href links from HTML, resolved to absolute URLs.
+        Pass same_domain_only=True to keep only links on the same host."""
+        links = _extract_links_from_html(html, base_url)
+        if same_domain_only:
+            base_host = urlparse(base_url).hostname
+            links = [l for l in links if urlparse(l).hostname == base_host]
+        return links
+
+    @mcp.tool()
+    def crawl(
+        base_url: str,
+        max_pages: int = 20,
+        max_depth: int = 3,
+        same_domain_only: bool = True,
+    ) -> dict:
+        """Crawl a website from base_url, following all discovered links.
+        Saves every page as a flow in the database for later analysis.
+        Returns a summary with all visited URLs and their status codes."""
+        visited: set[str] = set()
+        queue: deque = deque([(base_url, 0)])
+        results, errors = [], []
+        base_host = urlparse(base_url).hostname
+
+        while queue and len(visited) < max_pages:
+            url, depth = queue.popleft()
+            clean = urlparse(url)._replace(fragment="").geturl()
+            if clean in visited:
+                continue
+            visited.add(clean)
+
+            t0 = time.time()
+            try:
+                resp = http_requests.get(
+                    clean,
+                    headers={"User-Agent": "cdp-mcp-crawler/1.0"},
+                    verify=False,
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                duration_ms = int((time.time() - t0) * 1000)
+                flow_id = _save_synthetic_flow(
+                    store, clean, "GET",
+                    {"User-Agent": "cdp-mcp-crawler/1.0"},
+                    None, resp, duration_ms, tags=["crawled"],
+                )
+                results.append({
+                    "url": clean,
+                    "final_url": resp.url,
+                    "status_code": resp.status_code,
+                    "content_type": resp.headers.get("content-type", ""),
+                    "flow_id": flow_id,
+                    "depth": depth,
+                })
+
+                if "text/html" in resp.headers.get("content-type", "") and depth < max_depth:
+                    html = resp.content.decode("utf-8", errors="ignore")
+                    for link in _extract_links_from_html(html, resp.url):
+                        if same_domain_only and urlparse(link).hostname != base_host:
+                            continue
+                        if link not in visited:
+                            queue.append((link, depth + 1))
+
+            except Exception as e:
+                errors.append({"url": clean, "error": str(e)})
+
+        return {
+            "base_url": base_url,
+            "pages_crawled": len(results),
+            "pages_with_errors": len(errors),
+            "results": results,
+            "errors": errors,
+        }
 
     return mcp
