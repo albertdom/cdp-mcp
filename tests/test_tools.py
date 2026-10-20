@@ -204,3 +204,77 @@ def test_fuzz_flow_not_found(store, addon):
     result = _get_tool(mcp, "fuzz_flow")("missing", field="query.id", values=["1", "2"])
     assert len(result) == 1
     assert "error" in result[0]
+
+
+# --- Active interception ---
+
+def test_enable_intercept_sets_filter(store, addon):
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "enable_intercept")(filter="api.example.com")
+    addon.set_intercept_filter.assert_called_once_with("api.example.com")
+    assert result["intercept_enabled"] is True
+
+
+def test_enable_intercept_no_filter(store, addon):
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "enable_intercept")()
+    addon.set_intercept_filter.assert_called_once_with(None)
+    assert result["intercept_enabled"] is True
+
+
+def test_get_intercepted_returns_list(store, addon):
+    addon.get_intercepted_flows.return_value = [
+        {"id": "f1", "host": "api.example.com", "method": "POST", "path": "/login", "scheme": "https"}
+    ]
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "get_intercepted")()
+    assert len(result) == 1
+    assert result[0]["id"] == "f1"
+
+
+def test_release_flow_not_in_intercepted(store, addon):
+    addon.intercepted_flows = {}
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "release_flow")("missing")
+    assert "error" in result
+
+
+def test_drop_flow_not_in_intercepted(store, addon):
+    addon.intercepted_flows = {}
+    mcp = create_server(store, addon)
+    result = _get_tool(mcp, "drop_flow")("missing")
+    assert "error" in result
+
+
+def test_release_flow_resumes(store, addon):
+    mock_flow = MagicMock()
+    mock_flow.request.host = "example.com"
+    mock_flow.request.method = "GET"
+    mock_flow.request.path = "/test"
+    mock_flow.request.scheme = "https"
+    mock_flow.request.port = 443
+    mock_flow.request.query_string = ""
+    mock_flow.request.headers = {}
+    mock_flow.request.content = b""
+    addon.intercepted_flows = {"f1": mock_flow}
+    addon._loop = None
+
+    mcp = create_server(store, addon)
+    with patch("cdp_mcp.server._schedule_resume") as mock_resume:
+        result = _get_tool(mcp, "release_flow")("f1")
+    mock_resume.assert_called_once()
+    assert result["released"] is True
+    assert "f1" not in addon.intercepted_flows
+
+
+def test_drop_flow_kills(store, addon):
+    mock_flow = MagicMock()
+    addon.intercepted_flows = {"f1": mock_flow}
+    addon._loop = None
+
+    mcp = create_server(store, addon)
+    with patch("cdp_mcp.server._schedule_drop") as mock_drop:
+        result = _get_tool(mcp, "drop_flow")("f1")
+    mock_drop.assert_called_once()
+    assert result["dropped"] is True
+    assert "f1" not in addon.intercepted_flows

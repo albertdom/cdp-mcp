@@ -102,6 +102,22 @@ class ProxyState:
         return {"stopped": True}
 
 
+def _schedule_resume(flow, loop, modifications: dict = None):
+    if modifications and "body" in modifications:
+        body = modifications["body"]
+        flow.request.content = body.encode() if isinstance(body, str) else body
+    if modifications and "headers" in modifications:
+        flow.request.headers.update(modifications["headers"])
+    if loop:
+        asyncio.run_coroutine_threadsafe(flow.resume(), loop)
+    else:
+        flow.resume()
+
+
+def _schedule_drop(flow, loop):
+    flow.kill()
+
+
 def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
     mcp = FastMCP("cdp-mcp")
     state = ProxyState()
@@ -231,5 +247,37 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
             resp["fuzz_value"] = value
             results.append(resp)
         return results
+
+    @mcp.tool()
+    def enable_intercept(filter: str = None) -> dict:
+        """Enable active interception. Requests matching filter (substring of host) are paused.
+        Pass no filter to intercept all requests."""
+        addon.set_intercept_filter(filter)
+        return {"intercept_enabled": True, "filter": filter}
+
+    @mcp.tool()
+    def get_intercepted() -> list:
+        """Return list of currently intercepted (paused) flows awaiting a decision."""
+        return addon.get_intercepted_flows()
+
+    @mcp.tool()
+    def release_flow(flow_id: str, modifications: dict = None) -> dict:
+        """Forward an intercepted flow, optionally with modifications {headers, body}."""
+        flow = addon.intercepted_flows.get(flow_id)
+        if flow is None:
+            return {"error": f"No intercepted flow with id '{flow_id}'"}
+        _schedule_resume(flow, getattr(addon, "_loop", None), modifications)
+        del addon.intercepted_flows[flow_id]
+        return {"released": True, "flow_id": flow_id}
+
+    @mcp.tool()
+    def drop_flow(flow_id: str) -> dict:
+        """Discard an intercepted flow (never forwarded to server)."""
+        flow = addon.intercepted_flows.get(flow_id)
+        if flow is None:
+            return {"error": f"No intercepted flow with id '{flow_id}'"}
+        _schedule_drop(flow, getattr(addon, "_loop", None))
+        del addon.intercepted_flows[flow_id]
+        return {"dropped": True, "flow_id": flow_id}
 
     return mcp
