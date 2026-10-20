@@ -109,7 +109,7 @@ def _schedule_resume(flow, loop, modifications: dict = None):
     if modifications and "headers" in modifications:
         flow.request.headers.update(modifications["headers"])
     if loop:
-        asyncio.run_coroutine_threadsafe(flow.resume(), loop)
+        loop.call_soon_threadsafe(flow.resume)
     else:
         flow.resume()
 
@@ -192,7 +192,8 @@ def _export_python(record: dict) -> str:
     body_repr = repr(body.decode("utf-8", errors="replace")) if body else "None"
     return f"""import requests
 
-response = requests.{record['method'].lower()}(
+response = requests.request(
+    "{record['method']}",
     "{url}",
     headers={json.dumps(headers, indent=4)},
     data={body_repr},
@@ -366,21 +367,23 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
     @mcp.tool()
     def release_flow(flow_id: str, modifications: dict = None) -> dict:
         """Forward an intercepted flow, optionally with modifications {headers, body}."""
-        flow = addon.intercepted_flows.get(flow_id)
-        if flow is None:
-            return {"error": f"No intercepted flow with id '{flow_id}'"}
+        with addon._lock:
+            flow = addon.intercepted_flows.get(flow_id)
+            if flow is None:
+                return {"error": f"No intercepted flow with id '{flow_id}'"}
+            del addon.intercepted_flows[flow_id]
         _schedule_resume(flow, getattr(addon, "_loop", None), modifications)
-        del addon.intercepted_flows[flow_id]
         return {"released": True, "flow_id": flow_id}
 
     @mcp.tool()
     def drop_flow(flow_id: str) -> dict:
         """Discard an intercepted flow (never forwarded to server)."""
-        flow = addon.intercepted_flows.get(flow_id)
-        if flow is None:
-            return {"error": f"No intercepted flow with id '{flow_id}'"}
+        with addon._lock:
+            flow = addon.intercepted_flows.get(flow_id)
+            if flow is None:
+                return {"error": f"No intercepted flow with id '{flow_id}'"}
+            del addon.intercepted_flows[flow_id]
         _schedule_drop(flow, getattr(addon, "_loop", None))
-        del addon.intercepted_flows[flow_id]
         return {"dropped": True, "flow_id": flow_id}
 
     @mcp.tool()
@@ -392,7 +395,7 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
         findings = _analyze(record)
         return {
             "flow_id": flow_id,
-            "url": f"{record['scheme']}://{record['host']}{record['path']}",
+            "url": f"{record['scheme']}://{record['host']}:{record['port']}{record['path']}",
             "findings": findings,
             "finding_count": len(findings),
         }

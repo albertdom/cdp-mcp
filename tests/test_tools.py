@@ -233,20 +233,25 @@ def test_get_intercepted_returns_list(store, addon):
 
 
 def test_release_flow_not_in_intercepted(store, addon):
+    import threading
     addon.intercepted_flows = {}
+    addon._lock = threading.Lock()
     mcp = create_server(store, addon)
     result = _get_tool(mcp, "release_flow")("missing")
     assert "error" in result
 
 
 def test_drop_flow_not_in_intercepted(store, addon):
+    import threading
     addon.intercepted_flows = {}
+    addon._lock = threading.Lock()
     mcp = create_server(store, addon)
     result = _get_tool(mcp, "drop_flow")("missing")
     assert "error" in result
 
 
 def test_release_flow_resumes(store, addon):
+    import threading
     mock_flow = MagicMock()
     mock_flow.request.host = "example.com"
     mock_flow.request.method = "GET"
@@ -258,6 +263,7 @@ def test_release_flow_resumes(store, addon):
     mock_flow.request.content = b""
     addon.intercepted_flows = {"f1": mock_flow}
     addon._loop = None
+    addon._lock = threading.Lock()
 
     mcp = create_server(store, addon)
     with patch("cdp_mcp.server._schedule_resume") as mock_resume:
@@ -268,9 +274,11 @@ def test_release_flow_resumes(store, addon):
 
 
 def test_drop_flow_kills(store, addon):
+    import threading
     mock_flow = MagicMock()
     addon.intercepted_flows = {"f1": mock_flow}
     addon._loop = None
+    addon._lock = threading.Lock()
 
     mcp = create_server(store, addon)
     with patch("cdp_mcp.server._schedule_drop") as mock_drop:

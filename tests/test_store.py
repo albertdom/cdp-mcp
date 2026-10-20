@@ -105,3 +105,12 @@ def test_count(store):
     store.insert(_sample_flow("id1"))
     store.insert(_sample_flow("id2"))
     assert store.count() == 2
+
+def test_list_filter_path(store):
+    store.insert(_sample_flow("id1"))
+    f2 = _sample_flow("id2")
+    f2["path"] = "/admin/users"
+    store.insert(f2)
+    results = store.list_flows(path="/api")
+    assert len(results) == 1
+    assert results[0]["id"] == "id1"

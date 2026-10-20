@@ -5,7 +5,7 @@ from typing import Optional
 
 def _like_escape(s: str) -> str:
     """Escape special characters in LIKE patterns."""
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
 
 
 CREATE_TABLE = """
@@ -72,7 +72,7 @@ class FlowStore:
             clauses.append("host = ?")
             params.append(host)
         if path:
-            clauses.append("path LIKE ? ESCAPE '\\\\'")
+            clauses.append("path LIKE ? ESCAPE '!'")
             params.append(f"%{_like_escape(path)}%")
         if method:
             clauses.append("method = ?")
@@ -94,10 +94,10 @@ class FlowStore:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT * FROM flows WHERE
-                   host LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR query LIKE ? ESCAPE '\\'
-                   OR CAST(req_body AS TEXT) LIKE ? ESCAPE '\\'
-                   OR CAST(res_body AS TEXT) LIKE ? ESCAPE '\\'
-                   OR req_headers LIKE ? ESCAPE '\\' OR res_headers LIKE ? ESCAPE '\\'
+                   host LIKE ? ESCAPE '!' OR path LIKE ? ESCAPE '!' OR query LIKE ? ESCAPE '!'
+                   OR CAST(req_body AS TEXT) LIKE ? ESCAPE '!'
+                   OR CAST(res_body AS TEXT) LIKE ? ESCAPE '!'
+                   OR req_headers LIKE ? ESCAPE '!' OR res_headers LIKE ? ESCAPE '!'
                    ORDER BY timestamp DESC LIMIT 100""",
                 (like, like, like, like, like, like, like),
             ).fetchall()
