@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -16,14 +17,6 @@ import requests as http_requests
 from mcp.server.fastmcp import FastMCP
 from cdp_mcp.store import FlowStore
 from cdp_mcp.proxy import FlowStoreAddon
-
-_IGNORE_HOSTS = [
-    r".*\.anthropic\.com",
-    r".*\.claude\.ai",
-    r"api\.anthropic\.com",
-    r"statsig\.anthropic\.com",
-    r"sentry\.io",
-]
 
 
 def _set_system_proxy(port: Optional[int]) -> None:
@@ -60,8 +53,8 @@ CERT_INSTALL_INSTRUCTIONS = """
 CA certificate generated at: ~/.mitmproxy/mitmproxy-ca-cert.pem
 
 Install instructions:
-  Chrome/Edge (Windows): Settings → Privacy → Manage certificates → Trusted Root CAs → Import
-  Firefox: Settings → Privacy → Certificates → View Certificates → Authorities → Import
+  Chrome/Edge (Windows): Settings -> Privacy -> Manage certificates -> Trusted Root CAs -> Import
+  Firefox: Settings -> Privacy -> Certificates -> View Certificates -> Authorities -> Import
   System (Windows PowerShell as admin):
     Import-Certificate -FilePath "$env:USERPROFILE\\.mitmproxy\\mitmproxy-ca-cert.pem" -CertStoreLocation Cert:\\LocalMachine\\Root
 
@@ -73,11 +66,11 @@ class ProxyState:
     def __init__(self):
         self.running = False
         self.port: Optional[int] = None
-        self._master = None
-        self._thread: Optional[threading.Thread] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._proc: Optional[subprocess.Popen] = None
 
     def status(self, store: FlowStore) -> dict:
+        if self.running and self._proc and self._proc.poll() is not None:
+            self.running = False
         count = store.count() if self.running else 0
         return {
             "running": self.running,
@@ -85,49 +78,40 @@ class ProxyState:
             "flow_count": count,
         }
 
-    def start(self, store: FlowStore, addon: FlowStoreAddon, port: int = 8080) -> dict:
+    def start(self, store: FlowStore, addon, port: int = 8080) -> dict:
         if self.running:
             return {"error": f"Proxy already running on port {self.port}"}
 
-        ready_event = threading.Event()
-        error_holder = []
+        runner = str(pathlib.Path(__file__).parent / "runner.py")
+        db_path = store.db_path
 
-        def run():
-            from mitmproxy import options
-            from mitmproxy.tools import dump
+        proc = subprocess.Popen(
+            [sys.executable, runner, db_path, str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
 
-            async def amain():
-                opts = options.Options(
-                    listen_host="127.0.0.1",
-                    listen_port=port,
-                    ignore_hosts=_IGNORE_HOSTS,
-                )
-                master = dump.DumpMaster(opts, with_termlog=False, with_dumper=False)
-                master.addons.add(addon)
-                self._master = master
-                self._loop = asyncio.get_running_loop()
-                addon._loop = self._loop
-                self.running = True
-                self.port = port
-                ready_event.set()
-                try:
-                    await master.run()
-                except Exception as e:
-                    error_holder.append(str(e))
-                finally:
-                    self.running = False
+        # Wait for "READY\n" on stderr (written by runner.py when mitmproxy is listening)
+        deadline = time.time() + 8
+        ready = False
+        error_line = ""
+        while time.time() < deadline:
+            line = proc.stderr.readline()
+            if not line and proc.poll() is not None:
+                error_line = f"runner exited with code {proc.returncode}"
+                break
+            if line.strip() == "READY":
+                ready = True
+                break
 
-            asyncio.run(amain())
+        if not ready:
+            proc.terminate()
+            return {"error": error_line or "Proxy startup timed out after 8 seconds"}
 
-        self._thread = threading.Thread(target=run, daemon=True)
-        self._thread.start()
-        ready_event.wait(timeout=5)
-
-        if not ready_event.is_set():
-            return {"error": "Proxy startup timed out after 5 seconds"}
-        if error_holder:
-            return {"error": error_holder[0]}
-
+        self._proc = proc
+        self.running = True
+        self.port = port
         _set_system_proxy(port)
 
         return {
@@ -139,13 +123,15 @@ class ProxyState:
     def stop(self) -> dict:
         if not self.running:
             return {"error": "Proxy is not running"}
-        if self._master:
-            self._master.shutdown()
-        if self._thread:
-            self._thread.join(timeout=3)
+        if self._proc:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
         self.running = False
-        self._master = None
-        self._thread = None
+        self._proc = None
+        self.port = None
         _set_system_proxy(None)
         return {"stopped": True}
 
@@ -347,7 +333,7 @@ def create_server(store: FlowStore, addon: FlowStoreAddon) -> FastMCP:
     @mcp.tool()
     def start_proxy(port: int = 8080) -> dict:
         """Start the mitmproxy HTTP/HTTPS proxy on the given port."""
-        return state.start(store, addon, port)
+        return state.start(store, None, port)
 
     @mcp.tool()
     def stop_proxy() -> dict:

@@ -1,6 +1,7 @@
 import json
 import threading
 from typing import Optional
+from urllib.parse import urlsplit
 from cdp_mcp.store import FlowStore
 
 
@@ -36,7 +37,7 @@ class FlowStoreAddon:
             "scheme": flow.request.scheme,
             "method": flow.request.method,
             "path": flow.request.path,
-            "query": flow.request.query_string,
+            "query": urlsplit(flow.request.url).query,
             "req_headers": json.dumps(dict(flow.request.headers)),
             "req_body": flow.request.content,
             "res_status": flow.response.status_code,
