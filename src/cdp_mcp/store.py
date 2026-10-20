@@ -3,6 +3,11 @@ import threading
 from typing import Optional
 
 
+def _like_escape(s: str) -> str:
+    """Escape special characters in LIKE patterns."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS flows (
     id          TEXT PRIMARY KEY,
@@ -48,9 +53,10 @@ class FlowStore:
             self._conn.commit()
 
     def get(self, flow_id: str) -> Optional[dict]:
-        row = self._conn.execute(
-            "SELECT * FROM flows WHERE id = ?", (flow_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM flows WHERE id = ?", (flow_id,)
+            ).fetchone()
         return dict(row) if row else None
 
     def list_flows(
@@ -66,8 +72,8 @@ class FlowStore:
             clauses.append("host = ?")
             params.append(host)
         if path:
-            clauses.append("path LIKE ?")
-            params.append(f"%{path}%")
+            clauses.append("path LIKE ? ESCAPE '\\\\'")
+            params.append(f"%{_like_escape(path)}%")
         if method:
             clauses.append("method = ?")
             params.append(method.upper())
@@ -77,22 +83,24 @@ class FlowStore:
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
-        rows = self._conn.execute(
-            f"SELECT * FROM flows {where} ORDER BY timestamp DESC LIMIT ?", params
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM flows {where} ORDER BY timestamp DESC LIMIT ?", params
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def search(self, query: str) -> list[dict]:
-        like = f"%{query}%"
-        rows = self._conn.execute(
-            """SELECT * FROM flows WHERE
-               host LIKE ? OR path LIKE ? OR query LIKE ?
-               OR CAST(req_body AS TEXT) LIKE ?
-               OR CAST(res_body AS TEXT) LIKE ?
-               OR req_headers LIKE ? OR res_headers LIKE ?
-               ORDER BY timestamp DESC LIMIT 100""",
-            (like, like, like, like, like, like, like),
-        ).fetchall()
+        like = f"%{_like_escape(query)}%"
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM flows WHERE
+                   host LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR query LIKE ? ESCAPE '\\'
+                   OR CAST(req_body AS TEXT) LIKE ? ESCAPE '\\'
+                   OR CAST(res_body AS TEXT) LIKE ? ESCAPE '\\'
+                   OR req_headers LIKE ? ESCAPE '\\' OR res_headers LIKE ? ESCAPE '\\'
+                   ORDER BY timestamp DESC LIMIT 100""",
+                (like, like, like, like, like, like, like),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def update(self, flow_id: str, **kwargs) -> None:
@@ -109,7 +117,8 @@ class FlowStore:
             self._conn.commit()
 
     def count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0]
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0]
 
     def close(self) -> None:
         self._conn.close()
